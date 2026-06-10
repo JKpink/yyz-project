@@ -101,18 +101,11 @@ class IVRInference:
                 current_region = rois[0]
                 trace["rois"].append(current_region)
 
-            # 聚焦区域追问
+            # 聚焦区域追问（只传原图，用文本引导聚焦）
             refine_question = self._build_refine_question(
                 question, current_answer, current_region, pass_i
             )
-            if current_region:
-                # 裁剪 ROI 区域作为额外视觉输入
-                roi_image = image.crop(current_region)
-                answer_i, logits_i = self._single_pass(
-                    image, refine_question, roi_image=roi_image
-                )
-            else:
-                answer_i, logits_i = self._single_pass(image, refine_question)
+            answer_i, logits_i = self._single_pass(image, refine_question)
 
             conf_i = self.confidence_estimator.compute(
                 output_ids=answer_i["output_ids"],
@@ -139,10 +132,8 @@ class IVRInference:
         self,
         image: Image.Image,
         question: str,
-        roi_image: Optional[Image.Image] = None,
     ) -> Tuple[Dict, Optional[torch.Tensor]]:
-        """单次 VLM 推理"""
-        # 构造 message
+        """单次 VLM 推理 —— 一次只传一张图"""
         messages = [
             {
                 "role": "user",
@@ -152,22 +143,11 @@ class IVRInference:
                 ],
             }
         ]
-        if roi_image is not None:
-            messages[0]["content"].insert(
-                1, {"type": "text", "text": "\n[聚焦区域如下]\n"}
-            )
-            messages[0]["content"].insert(
-                2, {"type": "image", "image": roi_image}
-            )
 
         prompt = self.processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        # 消息中有几个 image 就传几个
-        all_images = [image]
-        if roi_image is not None:
-            all_images.append(roi_image)
-        inputs = self.processor(text=prompt, images=all_images, return_tensors="pt")
+        inputs = self.processor(text=prompt, images=[image], return_tensors="pt")
         inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
         input_len = inputs["input_ids"].shape[-1]
 
