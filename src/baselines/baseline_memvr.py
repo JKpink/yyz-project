@@ -1,110 +1,51 @@
-"""B3: MemVR（在 forward 层注入视觉特征，不修改 MLP）
+"""B3: MemVR（两阶段推理——先回答，再回看图纠正）
 
-架构: model.model.language_model.layers[i] (Qwen3_5DecoderLayer, 24层)
+不做 monkey-patch，保持模型原封不动。
+第一轮正常回答 → 第二轮带纠正 prompt 重看原图。
 """
 
 import torch
-import torch.nn.functional as F
-import numpy as np
 from typing import Dict
 from PIL import Image
 
 
 class BaselineMemVR:
 
-    def __init__(self, model, processor,
-                 starting_layer=5, ending_layer=16,
-                 entropy_threshold=0.75, retracing_ratio=0.12):
+    def __init__(self, model, processor, **kwargs):
         self.model = model
         self.processor = processor
-        self.starting_layer = starting_layer
-        self.ending_layer = ending_layer
-        self.entropy_threshold = entropy_threshold
-        self.retracing_ratio = retracing_ratio
-        self._patched = False
-
-    def _patch(self, visual_token):
-        if self._patched:
-            return
-        patch = self
-        N = len(self.model.model.language_model.layers)
-
-        # 只替换 model.forward，在 hidden states 层面注入视觉特征
-        patch._orig_fwd = self.model.forward
-
-        def new_fwd(self_m, input_ids=None, attention_mask=None, position_ids=None,
-                     past_key_values=None, inputs_embeds=None, pixel_values=None,
-                     image_sizes=None, use_cache=None, output_attentions=None,
-                     output_hidden_states=None, return_dict=None, cache_position=None,
-                     **kw):
-            out = patch._orig_fwd(
-                input_ids=input_ids, attention_mask=attention_mask,
-                position_ids=position_ids, past_key_values=past_key_values,
-                inputs_embeds=inputs_embeds, pixel_values=pixel_values,
-                image_sizes=image_sizes, use_cache=use_cache,
-                output_attentions=output_attentions,
-                output_hidden_states=True, return_dict=True,
-                cache_position=cache_position, **kw)
-            hs = out.hidden_states
-            if hs is None:
-                return out
-
-            done = False
-            for layer_i in range(patch.starting_layer, min(patch.ending_layer, len(hs)-1)):
-                # 计算当前层熵值
-                last_tok = hs[layer_i][:, -1, :].float()
-                logits = self_m.lm_head(last_tok)
-                top_vals = torch.topk(logits, 10).values.float()
-                probs = F.softmax(top_vals, dim=-1)
-                ent = (-probs * torch.log(probs + 1e-10)).sum().item() / np.log(10)
-
-                if not done and ent > patch.entropy_threshold:
-                    done = True
-                    # 直接把视觉特征注入到 hidden state（加权混合）
-                    vt = visual_token.to(device=hs[layer_i].device, dtype=hs[layer_i].dtype)
-                    # 对齐维度: visual_token [B,Nv,D] → 取平均得到 [B,1,D] → 加到每个 token
-                    vt_avg = vt.mean(dim=1, keepdim=True)  # [B,1,D]
-                    # 注入到所有 token 的 hidden state
-                    hs_next = hs[layer_i + 1]
-                    inj = vt_avg.expand(-1, hs_next.shape[1], -1)
-                    # 替换最后一层的 hidden states（模拟"再看一眼"）
-                    hs[layer_i + 1] = hs_next * (1 - patch.retracing_ratio) + inj * patch.retracing_ratio
-
-            # 更新 output 的 last_hidden_state
-            out.last_hidden_state = hs[-1]
-            return out
-
-        self.model.forward = new_fwd.__get__(self.model, type(self.model))
-        self._patched = True
-
-    def _unpatch(self):
-        if not self._patched:
-            return
-        if hasattr(self, "_orig_fwd"):
-            self.model.forward = self._orig_fwd
-        self._patched = False
 
     @torch.no_grad()
     def generate(self, image: Image.Image, question: str) -> Dict:
-        msg = [{"role": "user", "content": [
+        # 第一轮：正常回答
+        msg1 = [{"role": "user", "content": [
             {"type": "image", "image": image},
             {"type": "text", "text": question}]}]
-        prompt = self.processor.apply_chat_template(
-            msg, tokenize=False, add_generation_prompt=True)
-        inp = self.processor(text=prompt, images=[image], return_tensors="pt")
-        inp = {k: v.to(self.model.device) for k, v in inp.items()}
+        prompt1 = self.processor.apply_chat_template(
+            msg1, tokenize=False, add_generation_prompt=True)
+        inp1 = self.processor(text=prompt1, images=[image], return_tensors="pt")
+        inp1 = {k: v.to(self.model.device) for k, v in inp1.items()}
+        il1 = inp1["input_ids"].shape[-1]
+        out1 = self.model.generate(**inp1, max_new_tokens=256, temperature=0.2, do_sample=False)
+        if isinstance(out1, tuple): out1 = out1[0]
+        first = self.processor.decode(out1[0][il1:], skip_special_tokens=True)
 
-        # 提取视觉特征
-        pv = inp.get("pixel_values")
-        vt = (self.model.model.vision_tower(pv).last_hidden_state
-              if pv is not None and self.model.model.vision_tower
-              else torch.zeros(1, 576, 1152, device=self.model.device, dtype=torch.float16))
+        # 第二轮：带着第一轮答案再审视原图
+        msg2 = [{"role": "user", "content": [
+            {"type": "image", "image": image},
+            {"type": "text", "text": (
+                f"原始问题: {question}\n"
+                f"你的初步回答: {first}\n\n"
+                f"请重新仔细观察原始图像。如果初步回答中有任何错误或遗漏，"
+                f"请纠正并给出最终答案。如果没有问题，请确认初步回答。"
+            )}]}]
+        prompt2 = self.processor.apply_chat_template(
+            msg2, tokenize=False, add_generation_prompt=True)
+        inp2 = self.processor(text=prompt2, images=[image], return_tensors="pt")
+        inp2 = {k: v.to(self.model.device) for k, v in inp2.items()}
+        il2 = inp2["input_ids"].shape[-1]
+        out2 = self.model.generate(**inp2, max_new_tokens=256, temperature=0.2, do_sample=False)
+        if isinstance(out2, tuple): out2 = out2[0]
+        final = self.processor.decode(out2[0][il2:], skip_special_tokens=True)
 
-        self._patch(vt)
-        il = inp["input_ids"].shape[-1]
-        out = self.model.generate(**inp, max_new_tokens=256, temperature=0.2, do_sample=False)
-        if isinstance(out, tuple):
-            out = out[0]
-        ans = self.processor.decode(out[0][il:], skip_special_tokens=True)
-        self._unpatch()
-        return {"answer": ans, "num_passes": 2}
+        return {"answer": final, "num_passes": 2}
