@@ -4,7 +4,7 @@ Monkey-patch model.forward: 逐层监控 token 熵值, 超标时注入视觉特�
 架构: model.model.language_model.layers[i].mlp (Qwen3_5MLP, 24层)
 """
 
-import torch
+import torch, traceback
 import torch.nn.functional as F
 import numpy as np
 from typing import Dict
@@ -85,7 +85,7 @@ class BaselineMemVR:
             done = False
             ll = self_m.model.language_model.layers
             for idx in range(N):
-                t = hs[idx][0, -1, :].float()
+                t = hs[idx][0, -1, :].to(dtype=next(lm_head.parameters()).dtype)
                 lg = lm_head(t)
                 p = F.softmax(torch.topk(lg, 10).values.float(), dim=-1)
                 e = (-p * torch.log(p + 1e-10)).sum().item() / np.log(10)
@@ -102,24 +102,31 @@ class BaselineMemVR:
         if not self._patched: return
         for m in self.model.model.language_model.layers:
             if hasattr(m.mlp, "_orig"): m.mlp.forward = m.mlp._orig
-        if hasattr(self, "_orig_fwd"): self.model.forward = self._orig_fwd
+        # 删除实例属性让 forward 回退到类方法
+        try: del self.model.forward
+        except: pass
         self._patched = False
 
     @torch.no_grad()
     def generate(self, image: Image.Image, question: str) -> Dict:
-        msg = [{"role": "user", "content": [
-            {"type": "image", "image": image},
-            {"type": "text", "text": question}]}]
-        inputs = self.processor.apply_chat_template(
-            msg, tokenize=True, add_generation_prompt=True,
-            return_dict=True, return_tensors="pt",
-            downsample_mode="16x",
-        ).to(self.model.device)
-        il = inputs.input_ids.shape[-1]
+        try:
+            msg = [{"role": "user", "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": question}]}]
+            inputs = self.processor.apply_chat_template(
+                msg, tokenize=True, add_generation_prompt=True,
+                return_dict=True, return_tensors="pt",
+                downsample_mode="16x",
+            ).to(self.model.device)
+            il = inputs.input_ids.shape[-1]
 
-        self._patch()
-        out = self.model.generate(**inputs, downsample_mode="16x", max_new_tokens=256)
-        if isinstance(out, tuple): out = out[0]
-        ans = self.processor.decode(out[0][il:], skip_special_tokens=True)
-        self._unpatch()
-        return {"answer": ans, "num_passes": 2}
+            self._patch()
+            out = self.model.generate(**inputs, downsample_mode="16x", max_new_tokens=256)
+            if isinstance(out, tuple): out = out[0]
+            ans = self.processor.decode(out[0][il:], skip_special_tokens=True)
+            self._unpatch()
+            return {"answer": ans, "num_passes": 2}
+        except Exception:
+            traceback.print_exc()
+            self._unpatch()
+            return {"answer": f"ERROR: {traceback.format_exc()}", "num_passes": 0}
