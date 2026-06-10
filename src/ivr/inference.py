@@ -1,195 +1,98 @@
 """IVR (Iterative Visual Retracing) 推理主逻辑"""
 
-import torch
-import torch.nn.functional as F
+import torch, traceback
 from typing import Dict, List, Tuple, Optional
 from PIL import Image
-
 from .confidence import ConfidenceEstimator
 from .roi_extractor import ROIExtractor
 
 
 class IVRInference:
-    """迭代视觉追溯推理引擎
 
-    输入图像 + 问题 → 多次回看不同区域 → 迭代验证 → 最终答案
-    """
-
-    def __init__(
-        self,
-        model,
-        processor,
-        config,
-    ):
-        """
-        Args:
-            model: MiniCPM-V-4.6 模型（冻结）
-            processor: 对应的 processor
-            config: Config 对象
-        """
+    def __init__(self, model, processor, config):
         self.model = model
         self.processor = processor
         self.config = config
-
         self.max_passes = config.max_passes
         self.conf_high = config.confidence_high
         self.conf_low = config.confidence_low
-
         self.confidence_estimator = ConfidenceEstimator()
         self.roi_extractor = ROIExtractor(
-            strategy=config.ivr.get("roi_strategy", "attention"),
-            num_rois=config.ivr.get("num_rois", 3),
-        )
+            strategy=config.ivr.get("roi_strategy", "grid"),
+            num_rois=config.ivr.get("num_rois", 3))
 
     @torch.no_grad()
     def generate(self, image: Image.Image, question: str) -> Dict:
-        """
-        Args:
-            image: PIL Image
-            question: 自然语言问题
+        try:
+            return self._impl(image, question)
+        except Exception:
+            traceback.print_exc()
+            return {"answer": f"ERROR: {traceback.format_exc()}", "num_passes": 0}
 
-        Returns:
-            {
-                "answer": str,
-                "num_passes": int,
-                "pass_answers": [str, ...],    # 每轮输出
-                "pass_confidences": [float, ...],  # 每轮置信度
-                "rois": [bbox, ...],           # 聚焦的 ROI
-                "final_confidence": float,
-                "final_action": str,           # "stop" | "max_passes_reached"
-            }
-        """
-        trace = {
-            "pass_answers": [],
-            "pass_confidences": [],
-            "rois": [],
-        }
+    def _impl(self, image: Image.Image, question: str) -> Dict:
+        trace = {"pass_answers": [], "pass_confidences": [], "rois": []}
 
-        # ── Pass 1: 全局浏览 ──
-        answer_1, logits_1 = self._single_pass(image, question)
-        conf_1 = self.confidence_estimator.compute(
-            output_ids=answer_1["output_ids"],
-            logits=logits_1,
-        )
-        trace["pass_answers"].append(answer_1["text"])
-        trace["pass_confidences"].append(conf_1)
+        # Pass 1: 全局浏览
+        a1, _ = self._single_pass(image, question)
+        c1 = self.confidence_estimator.compute(output_ids=a1["output_ids"])
+        trace["pass_answers"].append(a1["text"])
+        trace["pass_confidences"].append(c1)
+        act = self.confidence_estimator.should_retry(c1, self.conf_high, self.conf_low)
+        if act == "stop":
+            return self._result(a1["text"], 1, "stop", trace)
 
-        action = self.confidence_estimator.should_retry(
-            conf_1, self.conf_high, self.conf_low
-        )
-        if action == "stop":
-            return self._build_result(answer_1["text"], 1, "stop", trace)
-
-        # ── Pass 2+: 迭代追溯 ──
-        current_answer = answer_1["text"]
-        current_region = None  # 默认全图
-
-        for pass_i in range(2, self.max_passes + 1):
-            # 提取 ROI
-            if pass_i == 2:
-                # 第一次追溯：基于 attention 找 ROI
-                rois = self.roi_extractor.extract(
-                    visual_features=answer_1.get("visual_features"),
-                    answer_text=current_answer,
-                    attentions=answer_1.get("attentions"),
-                )
-            else:
-                # 后续：根据最新置信度决定是否换区域
-                rois = self._update_rois(prev_rois, action)
-
+        # Pass 2+
+        cur = a1["text"]
+        reg = None
+        for pi in range(2, self.max_passes + 1):
+            rois = (self.roi_extractor.extract(None, cur) if pi == 2
+                    else self._rotate_rois(prev_rois, act))
+            prev_rois = rois
             if rois:
-                current_region = rois[0]
-                trace["rois"].append(current_region)
+                reg = rois[0]
+                trace["rois"].append(reg)
+            q = self._refine(question, cur, reg, pi)
+            ai, _ = self._single_pass(image, q)
+            ci = self.confidence_estimator.compute(output_ids=ai["output_ids"])
+            trace["pass_answers"].append(ai["text"])
+            trace["pass_confidences"].append(ci)
+            act = self.confidence_estimator.should_retry(ci, self.conf_high, self.conf_low)
+            cur = ai["text"]
+            if act == "stop":
+                return self._result(cur, pi, "stop", trace)
 
-            # 聚焦区域追问（只传原图，用文本引导聚焦）
-            refine_question = self._build_refine_question(
-                question, current_answer, current_region, pass_i
-            )
-            answer_i, logits_i = self._single_pass(image, refine_question)
+        return self._result(cur + "\n\n[建议人工复核]", self.max_passes, "max", trace)
 
-            conf_i = self.confidence_estimator.compute(
-                output_ids=answer_i["output_ids"],
-                logits=logits_i,
-            )
-            trace["pass_answers"].append(answer_i["text"])
-            trace["pass_confidences"].append(conf_i)
-
-            action = self.confidence_estimator.should_retry(
-                conf_i, self.conf_high, self.conf_low
-            )
-            current_answer = answer_i["text"]
-
-            if action == "stop":
-                return self._build_result(current_answer, pass_i, "stop", trace)
-
-        # ── 达到最大 pass 数 ──
-        final_answer = current_answer + "\n\n[建议人工复核]"
-        return self._build_result(
-            final_answer, self.max_passes, "max_passes_reached", trace
-        )
-
-    def _single_pass(
-        self,
-        image: Image.Image,
-        question: str,
-    ) -> Tuple[Dict, Optional[torch.Tensor]]:
-        """单次 VLM 推理 —— 官方 API"""
-        messages = [{"role": "user", "content": [
+    def _single_pass(self, image, question):
+        msg = [{"role": "user", "content": [
             {"type": "image", "image": image},
-            {"type": "text", "text": question},
-        ]}]
-        inputs = self.processor.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=True,
-            return_dict=True, return_tensors="pt",
-            downsample_mode="16x",
+            {"type": "text", "text": question}]}]
+        inp = self.processor.apply_chat_template(
+            msg, tokenize=True, add_generation_prompt=True,
+            return_dict=True, return_tensors="pt", downsample_mode="16x"
         ).to(self.model.device)
-        input_len = inputs.input_ids.shape[-1]
-
-        out = self.model.generate(**inputs, downsample_mode="16x", max_new_tokens=256)
+        il = inp.input_ids.shape[-1]
+        out = self.model.generate(**inp, downsample_mode="16x", max_new_tokens=256)
         if isinstance(out, tuple): out = out[0]
-        answer_text = self.processor.decode(out[0][input_len:], skip_special_tokens=True)
+        txt = self.processor.decode(out[0][il:], skip_special_tokens=True)
+        return {"text": txt, "output_ids": out}, None
 
-        result = {"text": answer_text, "output_ids": out}
-        return result, None
+    def _refine(self, q, ans, reg, n):
+        p = [f"原始问题: {q}", f"之前的判断: {ans}",
+             f"第{n}次复查。请仔细观察原图。"]
+        if reg:
+            p.append(f"请特别关注坐标({reg[0]},{reg[1]})-({reg[2]},{reg[3]})区域。")
+        p.append("纠正错误或遗漏，或确认之前判断。")
+        return "\n".join(p)
 
-    def _build_refine_question(
-        self,
-        original_question: str,
-        current_answer: str,
-        region: Optional[Tuple] = None,
-        pass_num: int = 2,
-    ) -> str:
-        """构造细化追问"""
-        parts = [
-            f"原始问题: {original_question}",
-            f"你之前的判断: {current_answer}",
-            f"请进行第{pass_num}次重新检查。",
-        ]
-        if region:
-            parts.append(
-                f"请特别关注图像中坐标({region[0]},{region[1]})到({region[2]},{region[3]})的区域。"
-            )
-        parts.append("如果发现之前遗漏或错误的地方，请修正。否则确认之前的判断。")
-        return "\n".join(parts)
+    def _rotate_rois(self, prev, act):
+        if act == "switch": return prev[1:] + prev[:1]
+        return prev
 
-    def _update_rois(self, prev_rois: List, action: str) -> List:
-        """更新 ROI 列表"""
-        if action == "switch":
-            # 轮转到下一个 ROI
-            return prev_rois[1:] + prev_rois[:1]
-        return prev_rois  # refine: 保持当前 ROI
-
-    def _build_result(self, answer, passes, action, trace) -> Dict:
-        return {
-            "answer": answer,
-            "num_passes": passes,
-            "pass_answers": trace["pass_answers"],
-            "pass_confidences": trace["pass_confidences"],
-            "rois": trace.get("rois", []),
-            "final_confidence": (
-                trace["pass_confidences"][-1]
-                if trace["pass_confidences"]
-                else 0.0
-            ),
-            "final_action": action,
-        }
+    def _result(self, a, p, act, t):
+        return {"answer": a, "num_passes": p,
+                "pass_answers": t["pass_answers"],
+                "pass_confidences": t["pass_confidences"],
+                "rois": t["rois"],
+                "final_confidence": t["pass_confidences"][-1] if t["pass_confidences"] else 0,
+                "final_action": act}
