@@ -55,13 +55,19 @@ pip install "transformers[torch]>=5.7.0" torchvision av pyyaml rouge-score matpl
 模型通过 HuggingFace 自动缓存，无需手动下载：
 
 ```python
-from transformers import AutoModelForImageTextToText, AutoProcessor
+from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
+
+quantization_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_compute_dtype=torch.float16,
+    bnb_4bit_use_double_quant=True,
+)
 
 model = AutoModelForImageTextToText.from_pretrained(
     "openbmb/MiniCPM-V-4.6",
     trust_remote_code=True,
     device_map="auto",
-    load_in_4bit=True,  # int4 量化，省一半显存
+    quantization_config=quantization_config,
 )
 processor = AutoProcessor.from_pretrained("openbmb/MiniCPM-V-4.6")
 ```

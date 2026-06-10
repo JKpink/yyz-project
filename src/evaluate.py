@@ -29,12 +29,18 @@ def load_model_and_processor(config):
     model_name = config.model_name
     print(f"[Loading] {model_name}")
 
-    model = AutoModelForImageTextToText.from_pretrained(
-        model_name,
+    model_kwargs = dict(
         trust_remote_code=True,
         device_map="auto",
-        load_in_4bit=True if config.model.get("use_quantized") else False,
     )
+    if config.model.get("use_quantized"):
+        from transformers import BitsAndBytesConfig
+        model_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_use_double_quant=True,
+        )
+    model = AutoModelForImageTextToText.from_pretrained(model_name, **model_kwargs)
     processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
     return model, processor
 
