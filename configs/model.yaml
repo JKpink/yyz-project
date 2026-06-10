@@ -1,9 +1,9 @@
 # 模型配置
 model:
-  name: "openbmb/MiniCPM-V-4_6-int4"
-  base_model: "openbmb/MiniCPM-V-4_6"
+  name: "openbmb/MiniCPM-V-4.6"
+  base_model: "openbmb/MiniCPM-V-4.6"
   use_quantized: true
-  quantization: "int4"
+  quantization: "int4"  # 通过 load_in_4bit=True 实现
   device: "cuda"
   torch_dtype: "auto"
 

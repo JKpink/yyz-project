@@ -58,11 +58,12 @@ pip install "transformers[torch]>=5.7.0" torchvision av pyyaml rouge-score matpl
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
 model = AutoModelForImageTextToText.from_pretrained(
-    "openbmb/MiniCPM-V-4_6-int4",
+    "openbmb/MiniCPM-V-4.6",
     trust_remote_code=True,
-    device_map="auto"
+    device_map="auto",
+    load_in_4bit=True,  # int4 量化，省一半显存
 )
-processor = AutoProcessor.from_pretrained("openbmb/MiniCPM-V-4_6-int4")
+processor = AutoProcessor.from_pretrained("openbmb/MiniCPM-V-4.6")
 ```
 
 首次自动下载 ~1.5GB（int4 量化），后续读缓存。
@@ -105,7 +106,7 @@ python src/evaluate.py --baseline all --max-images 500 --output results/baseline
 
 | 项目 | 值 |
 |------|-----|
-| 模型 | MiniCPM-V-4.6-int4 (1.3B) |
+| 模型 | MiniCPM-V-4.6 (1.3B, load_in_4bit) |
 | 推理显存 | ~10 GB（IVR 全模式） |
 | 最低 GPU | 单 T4 16GB |
 | 评测时间 (7500 张) | ~2-3 小时 |

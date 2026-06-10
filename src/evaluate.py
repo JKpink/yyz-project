@@ -33,6 +33,7 @@ def load_model_and_processor(config):
         model_name,
         trust_remote_code=True,
         device_map="auto",
+        load_in_4bit=True if config.model.get("use_quantized") else False,
     )
     processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
     return model, processor
