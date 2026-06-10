@@ -166,31 +166,26 @@ class IVRInference:
         inputs = self.processor(text=prompt, images=[image], return_tensors="pt")
         inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
 
-        outputs = self.model.generate(
+        input_len = inputs["input_ids"].shape[-1]
+        output_ids = self.model.generate(
             **inputs,
             max_new_tokens=256,
             temperature=0.2,
             do_sample=False,
-            output_scores=True,
-            return_dict_in_generate=True,
         )
 
-        input_len = inputs["input_ids"].shape[-1]
-        output_ids = outputs.sequences
+        if isinstance(output_ids, tuple):
+            output_ids = output_ids[0]
+
         answer_text = self.processor.decode(
             output_ids[0][input_len:], skip_special_tokens=True
         )
-
-        # 提取 logits（用于置信度估计）
-        logits = None
-        if hasattr(outputs, "scores") and outputs.scores:
-            logits = torch.stack(outputs.scores, dim=1)  # [1, gen_len, vocab]
 
         result = {
             "text": answer_text,
             "output_ids": output_ids,
         }
-        return result, logits
+        return result, None
 
     def _build_refine_question(
         self,

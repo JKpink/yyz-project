@@ -70,10 +70,10 @@ class BaselineMemVR:
                     d = x.shape[-1]
                     if not hasattr(mlp_module, "_adpt_w1"):
                         mlp_module._adpt_w1 = nn.Linear(d, d, bias=False).to(
-                            x.device
+                            device=x.device, dtype=x.dtype
                         )
                         mlp_module._adpt_w2 = nn.Linear(d, d, bias=False).to(
-                            x.device
+                            device=x.device, dtype=x.dtype
                         )
                         nn.init.xavier_uniform_(
                             mlp_module._adpt_w1.weight
