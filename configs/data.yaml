@@ -1,21 +1,40 @@
-# 数据集配置
-iu_xray:
-  name: "IU X-Ray"
-  root: "data/IU-X-Ray"
-  num_images: 7470
-  num_reports: 3955
-  source: "https://openi.nlm.nih.gov/faq"
+# 数据集配置 —— 多层次评测
 
-pope:
-  name: "POPE"
-  source: "RUCAIBox/POPE"
+datasets:
+  # 医学影像（领域特化）
+  iu_xray:
+    name: "IU X-Ray"
+    kaggle_paths:
+      - "/kaggle/input/chest-xrays-indiana-university/images"
+      - "/kaggle/input/chest-xrays-indiana-university"
+    num_images: 7470
+    question: "请描述这张胸片中的异常发现。如果未发现异常，请说明是正常胸片。"
 
-vqa_v2:
-  name: "VQA v2"
-  source: "https://visualqa.org/"
+  # 通用图像描述（CHAIR 评测基准）
+  coco:
+    name: "COCO val2017"
+    kaggle_paths:
+      - "/kaggle/input/coco-2017/val2017"
+    num_images: 5000
+    question: "请详细描述这张图片中的内容。"
+
+  # VQA 通用视觉问答
+  vqa_v2:
+    name: "VQA v2"
+    kaggle_paths:
+      - "/kaggle/input/vqa-v2/val2014"
+    num_images: 40000
+    question: null  # 从标注文件中读取问题
+
+  # POPE 幻觉探测（yes/no 问答）
+  pope:
+    name: "POPE"
+    source: "RUCAIBox/POPE"
+    type: "benchmark"  # 不需要加载图像，有专属评测逻辑
 
 # 评测配置
 evaluation:
   batch_size: 1
-  max_images: 500  # 评测子集大小，全量评测设为 7470
+  max_images_per_dataset: 500   # 每个数据集评测张数
+  active_datasets: ["iu_xray", "coco", "pope"]  # 当前激活的评测集
   seed: 42
