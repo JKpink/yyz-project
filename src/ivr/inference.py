@@ -133,42 +133,23 @@ class IVRInference:
         image: Image.Image,
         question: str,
     ) -> Tuple[Dict, Optional[torch.Tensor]]:
-        """单次 VLM 推理 —— 一次只传一张图"""
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image", "image": image},
-                    {"type": "text", "text": question},
-                ],
-            }
-        ]
+        """单次 VLM 推理 —— 官方 API"""
+        messages = [{"role": "user", "content": [
+            {"type": "image", "image": image},
+            {"type": "text", "text": question},
+        ]}]
+        inputs = self.processor.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=True,
+            return_dict=True, return_tensors="pt",
+            downsample_mode="16x",
+        ).to(self.model.device)
+        input_len = inputs.input_ids.shape[-1]
 
-        prompt = self.processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        inputs = self.processor(text=prompt, images=[image], return_tensors="pt")
-        inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
-        input_len = inputs["input_ids"].shape[-1]
+        out = self.model.generate(**inputs, downsample_mode="16x", max_new_tokens=256)
+        if isinstance(out, tuple): out = out[0]
+        answer_text = self.processor.decode(out[0][input_len:], skip_special_tokens=True)
 
-        output_ids = self.model.generate(
-            **inputs,
-            max_new_tokens=256,
-            temperature=0.2,
-            do_sample=False,
-        )
-
-        if isinstance(output_ids, tuple):
-            output_ids = output_ids[0]
-
-        answer_text = self.processor.decode(
-            output_ids[0][input_len:], skip_special_tokens=True
-        )
-
-        result = {
-            "text": answer_text,
-            "output_ids": output_ids,
-        }
+        result = {"text": answer_text, "output_ids": out}
         return result, None
 
     def _build_refine_question(
