@@ -6,7 +6,7 @@ ivr:
   num_rois: 3                       # 每次最多提取的 ROI 数量
 
   # ROI 提取策略: "attention" | "grid" | "hybrid"
-  roi_strategy: "attention"
+  roi_strategy: "grid"  # grid/attention/activation/hybrid
 
   # 追溯特征融合权重
   fusion_global_weight: 0.3

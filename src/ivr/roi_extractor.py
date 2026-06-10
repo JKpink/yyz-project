@@ -34,21 +34,14 @@ class ROIExtractor:
         Returns:
             List of (x1, y1, x2, y2) bboxes
         """
+        # 默认用 grid（不依赖模型内部状态）
         if self.strategy == "attention" and attentions is not None:
             return self._extract_by_attention(attentions, image_size)
-        elif self.strategy == "grid":
-            return self._extract_by_grid(image_size)
-        elif self.strategy == "hybrid":
-            rois = []
-            if attentions is not None:
-                rois = self._extract_by_attention(attentions, image_size)
-            # 用 grid 补足
-            grid_rois = self._extract_by_grid(image_size)
-            rois.extend(grid_rois[len(rois) : self.num_rois])
-            return rois[: self.num_rois]
-        else:
-            # 默认：基于视觉特征活跃度定位
+        elif self.strategy == "activation" and visual_features is not None:
             return self._extract_by_activation(visual_features, image_size)
+        else:
+            # 降级到 grid（最可靠，不需要模型内部信息）
+            return self._extract_by_grid(image_size)
 
     def _extract_by_attention(
         self,
