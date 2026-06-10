@@ -163,7 +163,11 @@ class IVRInference:
         prompt = self.processor.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        inputs = self.processor(text=prompt, images=[image], return_tensors="pt")
+        # 消息中有几个 image 就传几个
+        all_images = [image]
+        if roi_image is not None:
+            all_images.append(roi_image)
+        inputs = self.processor(text=prompt, images=all_images, return_tensors="pt")
         inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
         input_len = inputs["input_ids"].shape[-1]
 
