@@ -1,10 +1,9 @@
-"""B3: MemVR（真正的 monkey-patch forward）
+"""B3: MemVR（在 forward 层注入视觉特征，不修改 MLP）
 
-架构: model.model.language_model.layers[i].mlp (Qwen3_5MLP, 24层)
+架构: model.model.language_model.layers[i] (Qwen3_5DecoderLayer, 24层)
 """
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from typing import Dict
@@ -24,47 +23,13 @@ class BaselineMemVR:
         self.retracing_ratio = retracing_ratio
         self._patched = False
 
-    def _patch(self):
+    def _patch(self, visual_token):
         if self._patched:
             return
-        layers = self.model.model.language_model.layers
-        N = len(layers)
         patch = self
+        N = len(self.model.model.language_model.layers)
 
-        # Step 1: 保存原始 & 加属性
-        for i in range(N):
-            mlp = layers[i].mlp
-            mlp._orig = mlp.forward
-            mlp._active = patch.starting_layer <= i <= patch.ending_layer
-            mlp._sign = 0
-            mlp._ratio = patch.retracing_ratio
-            mlp._w1 = None
-            mlp._w2 = None
-
-        # Step 2: 替换 MLP forward
-        def mk_fwd(m):
-            o = m._orig
-            def f(x):
-                dtype = next(m.parameters()).dtype
-                x = x.to(dtype)
-                out = o(x)
-                if m._sign:
-                    D = x.shape[-1]
-                    if m._w1 is None:
-                        m._w1 = nn.Linear(D, D, bias=False).to(device=x.device, dtype=dtype)
-                        m._w2 = nn.Linear(D, D, bias=False).to(device=x.device, dtype=dtype)
-                    a = m._w2(torch.relu(m._w1(x)))
-                    a = a.to(dtype)
-                    s = out.abs().mean() / (a.abs().mean() + 1e-8)
-                    out = out * (1 - m._ratio) + a * s * m._ratio
-                    m._sign = 0
-                return out
-            return f
-
-        for i in range(N):
-            layers[i].mlp.forward = mk_fwd(layers[i].mlp)
-
-        # Step 3: 保存 & 替换 model.forward
+        # 只替换 model.forward，在 hidden states 层面注入视觉特征
         patch._orig_fwd = self.model.forward
 
         def new_fwd(self_m, input_ids=None, attention_mask=None, position_ids=None,
@@ -80,23 +45,33 @@ class BaselineMemVR:
                 output_attentions=output_attentions,
                 output_hidden_states=True, return_dict=True,
                 cache_position=cache_position, **kw)
-            hs = out.get("hidden_states")
+            hs = out.hidden_states
             if hs is None:
                 return out
+
             done = False
-            ll = self_m.model.language_model.layers
-            for idx in range(N):
-                t = hs[idx][0, -1, :].float()
-                lg = self_m.lm_head(t)
-                p = F.softmax(torch.topk(lg, 10).values.float(), dim=-1)
-                e = (-p * torch.log(p + 1e-10)).sum().item() / np.log(10)
-                if (not done and patch.starting_layer <= idx <= patch.ending_layer
-                        and e > patch.entropy_threshold):
+            for layer_i in range(patch.starting_layer, min(patch.ending_layer, len(hs)-1)):
+                # 计算当前层熵值
+                last_tok = hs[layer_i][:, -1, :].float()
+                logits = self_m.lm_head(last_tok)
+                top_vals = torch.topk(logits, 10).values.float()
+                probs = F.softmax(top_vals, dim=-1)
+                ent = (-probs * torch.log(probs + 1e-10)).sum().item() / np.log(10)
+
+                if not done and ent > patch.entropy_threshold:
                     done = True
-                    nx = min(idx + 1, N - 1)
-                    mlp = ll[nx].mlp
-                    if mlp._active:
-                        mlp._sign = 1
+                    # 直接把视觉特征注入到 hidden state（加权混合）
+                    vt = visual_token.to(device=hs[layer_i].device, dtype=hs[layer_i].dtype)
+                    # 对齐维度: visual_token [B,Nv,D] → 取平均得到 [B,1,D] → 加到每个 token
+                    vt_avg = vt.mean(dim=1, keepdim=True)  # [B,1,D]
+                    # 注入到所有 token 的 hidden state
+                    hs_next = hs[layer_i + 1]
+                    inj = vt_avg.expand(-1, hs_next.shape[1], -1)
+                    # 替换最后一层的 hidden states（模拟"再看一眼"）
+                    hs[layer_i + 1] = hs_next * (1 - patch.retracing_ratio) + inj * patch.retracing_ratio
+
+            # 更新 output 的 last_hidden_state
+            out.last_hidden_state = hs[-1]
             return out
 
         self.model.forward = new_fwd.__get__(self.model, type(self.model))
@@ -105,9 +80,6 @@ class BaselineMemVR:
     def _unpatch(self):
         if not self._patched:
             return
-        for m in self.model.model.language_model.layers:
-            if hasattr(m.mlp, "_orig"):
-                m.mlp.forward = m.mlp._orig
         if hasattr(self, "_orig_fwd"):
             self.model.forward = self._orig_fwd
         self._patched = False
@@ -117,11 +89,18 @@ class BaselineMemVR:
         msg = [{"role": "user", "content": [
             {"type": "image", "image": image},
             {"type": "text", "text": question}]}]
-        prompt = self.processor.apply_chat_template(msg, tokenize=False, add_generation_prompt=True)
+        prompt = self.processor.apply_chat_template(
+            msg, tokenize=False, add_generation_prompt=True)
         inp = self.processor(text=prompt, images=[image], return_tensors="pt")
-        inp = {k: v.to(self.model.device) if torch.is_tensor(v) else v for k, v in inp.items()}
+        inp = {k: v.to(self.model.device) for k, v in inp.items()}
 
-        self._patch()
+        # 提取视觉特征
+        pv = inp.get("pixel_values")
+        vt = (self.model.model.vision_tower(pv).last_hidden_state
+              if pv is not None and self.model.model.vision_tower
+              else torch.zeros(1, 576, 1152, device=self.model.device, dtype=torch.float16))
+
+        self._patch(vt)
         il = inp["input_ids"].shape[-1]
         out = self.model.generate(**inp, max_new_tokens=256, temperature=0.2, do_sample=False)
         if isinstance(out, tuple):
