@@ -1,29 +1,29 @@
-"""B2: CoT Prompting Baseline —— 提示模型逐步思考"""
+"""B2: Thinking 模型 Baseline —— MiniCPM-V-4.6-Thinking 内置推理链"""
 
 import torch
 from typing import Dict
 from PIL import Image
 
 
-class BaselineCoT:
-    """CoT 提示：标准 chain-of-thought"""
+class BaselineThinking:
+    """使用内置 Thinking 能力的模型
+
+    基座: openbmb/MiniCPM-V-4.6-Thinking
+    区别于 B1: 模型训练时学会了推理模式, 自动生成思考过程再回答
+    """
 
     def __init__(self, model, processor):
         self.model = model
         self.processor = processor
 
-    COT_PREFIX = "请一步步思考后再回答。"
-
     @torch.no_grad()
     def generate(self, image: Image.Image, question: str) -> Dict:
-        cot_question = f"{self.COT_PREFIX}\n\n问题：{question}"
-
         messages = [
             {
                 "role": "user",
                 "content": [
                     {"type": "image", "image": image},
-                    {"type": "text", "text": cot_question},
+                    {"type": "text", "text": question},
                 ],
             }
         ]
@@ -37,7 +37,7 @@ class BaselineCoT:
         input_len = inputs["input_ids"].shape[-1]
         outputs = self.model.generate(
             **inputs,
-            max_new_tokens=384,  # CoT 需要更多 token
+            max_new_tokens=384,
             temperature=0.2,
             do_sample=False,
         )
@@ -48,5 +48,5 @@ class BaselineCoT:
 
         return {
             "answer": answer,
-            "num_passes": 1,  # CoT 不增加视觉 pass
+            "num_passes": 1,  # Thinking 是文本推理, 不增加视觉 pass
         }
