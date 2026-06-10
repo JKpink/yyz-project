@@ -50,9 +50,11 @@ class POPEEvaluator:
             pred = r["pred_answer"].lower().strip()
             gt = r["ground_truth"].lower().strip()
 
-            # 归一化
-            pred_yes = any(w in pred for w in ["yes", "是", "有", "存在", "可以"])
-            gt_yes = any(w in gt for w in ["yes", "是", "有", "存在", "可以"])
+            # 归一化：先检查否定，再检查肯定
+            pred_no = any(w in pred for w in ["没有","不是","no","不会","否"])
+            pred_yes = not pred_no and any(w in pred for w in ["yes", "是", "有", "存在", "可以"])
+            gt_no = any(w in gt for w in ["no","否","没有"])
+            gt_yes = not gt_no and any(w in gt for w in ["yes", "是", "有", "存在", "可以"])
 
             if pred_yes:
                 yes_count += 1
