@@ -1,0 +1,31 @@
+# 数据文件（太大，不上传）
+data/
+models/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 结果输出（本地生成）
+results/*.json
+results/figures/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# HuggingFace 缓存
+.cache/
+
+# IDE
+.vscode/
+.idea/
+
+# 课程文档（非代码）
+智能科学综合课程设计五/
+
+# MemVR 子模块（只参考，不修改）
+repositories/MemVR/

@@ -1,0 +1,18 @@
+# IVR 超参数配置
+ivr:
+  max_passes: 4
+  confidence_threshold_high: 0.9   # 高于此值直接输出
+  confidence_threshold_low: 0.6    # 低于此值切换聚焦区域
+  num_rois: 3                       # 每次最多提取的 ROI 数量
+
+  # ROI 提取策略: "attention" | "grid" | "hybrid"
+  roi_strategy: "attention"
+
+  # 追溯特征融合权重
+  fusion_global_weight: 0.3
+  fusion_local_weight: 0.7
+
+# MemVR 移植配置
+memvr:
+  retrace_layers: [16, 20, 23]  # 在哪些层进行记忆回看
+  memory_bank_size: 64           # 记忆存储的 token 数

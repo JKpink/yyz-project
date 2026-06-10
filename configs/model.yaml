@@ -1,0 +1,14 @@
+# 模型配置
+model:
+  name: "openbmb/MiniCPM-V-4_6-int4"
+  base_model: "openbmb/MiniCPM-V-4_6"
+  use_quantized: true
+  quantization: "int4"
+  device: "cuda"
+  torch_dtype: "auto"
+
+# 推理配置
+inference:
+  max_new_tokens: 256
+  temperature: 0.2
+  do_sample: false

@@ -1,0 +1,21 @@
+# 数据集配置
+iu_xray:
+  name: "IU X-Ray"
+  root: "data/IU-X-Ray"
+  num_images: 7470
+  num_reports: 3955
+  source: "https://openi.nlm.nih.gov/faq"
+
+pope:
+  name: "POPE"
+  source: "RUCAIBox/POPE"
+
+vqa_v2:
+  name: "VQA v2"
+  source: "https://visualqa.org/"
+
+# 评测配置
+evaluation:
+  batch_size: 1
+  max_images: 500  # 评测子集大小，全量评测设为 7470
+  seed: 42
