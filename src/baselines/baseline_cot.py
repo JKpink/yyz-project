@@ -6,16 +6,13 @@ from PIL import Image
 
 
 class BaselineCoT:
-    """CoT 提示：加"请一步步思考后再回答""""
+    """CoT 提示：标准 chain-of-thought"""
 
     def __init__(self, model, processor):
         self.model = model
         self.processor = processor
 
-    COT_PREFIX = (
-        "请慢慢地、一步步地思考下面的问题。"
-        "先描述你在图中看到了什么，再进行分析，最后给出答案。"
-    )
+    COT_PREFIX = "请一步步思考后再回答。"
 
     @torch.no_grad()
     def generate(self, image: Image.Image, question: str) -> Dict:
