@@ -164,9 +164,18 @@ class IVRInference:
             messages, tokenize=False, add_generation_prompt=True
         )
         inputs = self.processor(text=prompt, images=[image], return_tensors="pt")
-        inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+        inputs = {k: v.to(self.model.device) if torch.is_tensor(v) else v
+                  for k, v in inputs.items()}
 
-        input_len = inputs["input_ids"].shape[-1]
+        # 兼容不同 processor 返回格式
+        if "input_ids" in inputs:
+            input_ids = inputs["input_ids"]
+        elif hasattr(inputs, "input_ids"):
+            input_ids = inputs.input_ids
+        else:
+            raise KeyError("processor 未返回 input_ids")
+        input_len = input_ids.shape[-1]
+
         output_ids = self.model.generate(
             **inputs,
             max_new_tokens=256,
